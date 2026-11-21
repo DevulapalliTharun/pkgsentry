@@ -13,3 +13,6 @@ downloads/
 *.tar.gz
 *.tgz
 *.whl
+
+# Personal study guide (contains interview answers)
+guide/
