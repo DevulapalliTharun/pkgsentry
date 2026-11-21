@@ -5,6 +5,9 @@ venv/
 .venv/
 .pytest_cache/
 .DS_Store
+*.egg-info/
+build/
+dist/
 
 # Never commit downloaded packages or malware samples
 samples/

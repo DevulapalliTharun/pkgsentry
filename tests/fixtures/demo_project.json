@@ -1,0 +1,40 @@
+{
+  "info": {
+    "name": "demo-pkg",
+    "version": "2.0.0",
+    "summary": "A demo package used in tests.",
+    "author": "",
+    "author_email": "Demo Author <demo@example.com>",
+    "home_page": "",
+    "project_urls": {"Source": "https://example.com/demo-pkg"},
+    "description": "A long description of the demo package."
+  },
+  "urls": [
+    {
+      "filename": "demo_pkg-2.0.0.tar.gz",
+      "packagetype": "sdist",
+      "url": "https://files.example.com/demo_pkg-2.0.0.tar.gz",
+      "size": 2048,
+      "digests": {"sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+      "upload_time_iso_8601": "2024-03-02T10:00:00.000000Z"
+    },
+    {
+      "filename": "demo_pkg-2.0.0-py3-none-any.whl",
+      "packagetype": "bdist_wheel",
+      "url": "https://files.example.com/demo_pkg-2.0.0-py3-none-any.whl",
+      "size": 1024,
+      "digests": {"sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+      "upload_time_iso_8601": "2024-03-02T10:05:00.000000Z"
+    }
+  ],
+  "releases": {
+    "1.0.0": [
+      {"filename": "demo_pkg-1.0.0.tar.gz", "packagetype": "sdist", "upload_time_iso_8601": "2023-01-15T08:00:00.000000Z"}
+    ],
+    "1.5.0": [],
+    "2.0.0": [
+      {"filename": "demo_pkg-2.0.0.tar.gz", "packagetype": "sdist", "upload_time_iso_8601": "2024-03-02T10:00:00.000000Z"},
+      {"filename": "demo_pkg-2.0.0-py3-none-any.whl", "packagetype": "bdist_wheel", "upload_time_iso_8601": "2024-03-02T10:05:00.000000Z"}
+    ]
+  }
+}
