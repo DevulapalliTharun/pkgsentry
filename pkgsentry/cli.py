@@ -1,4 +1,5 @@
-"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code` and `scan` (with optional `--ai`)."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code`, `scan` (with optional `--ai` and `--db`)
+and `campaigns`."""
 
 import argparse
 import re
@@ -12,15 +13,17 @@ from pkgsentry.analyzers.hooks import Hook, find_hooks
 from pkgsentry.analyzers.obfuscation import scan_obfuscation
 from pkgsentry.analyzers.rules import Finding, check_code
 from pkgsentry.analyzers.typosquat import NameCheck, check_name
+from pkgsentry.campaigns import Indicator, extract_indicators, link
 from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
 from pkgsentry.models import PackageInfo, ReleaseFile
 from pkgsentry.scoring import RiskReport, score_package
+from pkgsentry.storage import StoredScan, load_scans, save_scan
 from pkgsentry.triage.evidence import Excerpt, build_evidence
 from pkgsentry.triage.gemini import MODEL, GeminiError, generate_json, load_api_key
 from pkgsentry.triage.prompt import SCHEMA, SYSTEM, build_prompt
-from pkgsentry.triage.verify import Decision, Verified, decide, verify
+from pkgsentry.triage.verify import LEVELS, Decision, Verified, decide, verify
 
 _URL_TEXT = re.compile(r"(?i)\bhttp(s?)://([^\s/'\"<>]+)")
 _IPV4_TEXT = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b")
@@ -51,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
                                help="run all current checks and print a risk score with evidence (never installs or runs it)")
     scan.add_argument("--ai", action="store_true",
                       help="if the score is above LOW, ask Gemini to explain the flagged lines; every claim is verified")
+    scan.add_argument("--db", type=Path, help="save the result to this SQLite file and show links to earlier scans")
+    campaigns = commands.add_parser("campaigns", help="group saved scans that share attacker-specific infrastructure")
+    campaigns.add_argument("--db", type=Path, required=True, help="the SQLite file written by scan --db")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -81,11 +87,24 @@ def main(argv: list[str] | None = None) -> int:
             findings = check_code(extraction.root, file.kind, hooks)
             findings.extend(scan_obfuscation(extraction.root, file.kind, hooks, findings))
             result = score_package(package, name_check, hooks, findings)
+            indicators = extract_indicators(extraction.root, findings)
             print(format_scan(package, file, archive, extraction, result))
+            if indicators:
+                print()
+                print(format_indicators(indicators))
+            if args.db:
+                save_scan(args.db, package.name, package.version, file.kind, file.sha256, result.score, result.level,
+                          indicators)
+                print()
+                print(format_links(package.name, indicators, load_scans(args.db)))
             if args.ai:
                 label = f"{package.name} {package.version} ({file.kind})"
                 print()
                 print(_triage(label, extraction.root, hooks, findings, result))
+        elif args.command == "campaigns":
+            if not args.db.is_file():
+                raise ValueError(f"no scan history at {args.db}; run scan --db {args.db} first")
+            print(format_campaigns(load_scans(args.db)))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
@@ -218,6 +237,51 @@ def format_scan(package: PackageInfo, file: ReleaseFile, archive: Path,
     return "\n".join(lines)
 
 
+def format_indicators(indicators: list[Indicator]) -> str:
+    lines = [f"Indicators  {_plural(len(indicators), 'outside address', 'outside addresses')} in flagged files; "
+             "only attacker-specific ones link packages"]
+    for indicator in indicators[:20]:
+        how = f"links by {_show_key(indicator.key)}" if indicator.key else "shared service, never links"
+        hidden = "; hidden in base64" if indicator.hidden else ""
+        lines.append(f"  {_printable(_defang(indicator.value))[:100]}  {_printable(indicator.path)}:{indicator.line}"
+                     f"  ({how}{hidden})")
+    if len(indicators) > 20:
+        lines.append(f"  ... and {len(indicators) - 20} more")
+    return "\n".join(lines)
+
+
+def format_links(name: str, indicators: list[Indicator], scans: list[StoredScan]) -> str:
+    keys = {indicator.key for indicator in indicators if indicator.key}
+    shared = sorted({(i.key, s.package, s.version, s.level) for s in scans if s.package != name
+                     for i in s.indicators if i.key in keys})
+    if not shared:
+        return ("Links       none: no other saved package shares an attacker-specific indicator "
+                f"({_plural(len(scans), 'scan', 'scans')} saved)")
+    lines = ["Links       shares attacker-specific indicators with earlier scans:"]
+    lines += [f"  {_show_key(key)}  ->  {_printable(package)} {_printable(version)} ({_level(level)})"
+              for key, package, version, level in shared[:20]]
+    return "\n".join(lines)
+
+
+def format_campaigns(scans: list[StoredScan]) -> str:
+    keys: dict[str, set[str]] = {}
+    levels: dict[str, str] = {}
+    for scan in scans:
+        keys.setdefault(scan.package, set()).update(i.key for i in scan.indicators)
+        levels[scan.package] = max(levels.get(scan.package, "low"), scan.level, key=LEVELS.index)
+    groups = sorted(link(keys), key=lambda c: (-max(LEVELS.index(levels[p]) for p in c.packages), -len(c.packages)))
+    lines = [f"{_plural(len(groups), 'group', 'groups')} among {_plural(len(keys), 'saved package', 'saved packages')}, "
+             "linked only by attacker-specific indicators"]
+    for number, group in enumerate(groups, 1):
+        top = max((levels[p] for p in group.packages), key=LEVELS.index)
+        lines.append(f"Group {number}  {len(group.packages)} packages, highest level {_level(top)}")
+        lines.append("  " + ", ".join(f"{_printable(p)} ({_level(levels[p])})" for p in group.packages))
+        lines += [f"  shares {_show_key(key)}: {', '.join(_printable(n) for n in names)}" for key, names in group.links]
+    if not groups:
+        lines.append("  No two saved packages share an attacker-specific indicator.")
+    return "\n".join(lines)
+
+
 def _triage(label: str, root: Path, hooks: list[Hook], findings: list[Finding], result: RiskReport) -> str:
     if result.level == "low":
         return "AI triage   skipped: the rule score is LOW, and the AI only reviews flagged packages"
@@ -263,6 +327,15 @@ def format_triage(excerpts: list[Excerpt], verified: Verified, decision: Decisio
 
 def _level(value: str) -> str:
     return {"low": "LOW", "guarded": "GUARDED", "high": "HIGH", "critical": "CRITICAL"}.get(value, value.upper())
+
+
+def _show_key(key: str) -> str:
+    # Keys hold hostnames and IP addresses; defang every dot so no terminal turns them into links.
+    return _printable(key.replace(".", "[.]"))
+
+
+def _plural(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
 
 
 def _printable(text: str) -> str:

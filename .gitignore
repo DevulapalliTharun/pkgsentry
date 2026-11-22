@@ -17,5 +17,8 @@ downloads/
 *.tgz
 *.whl
 
+# Local scan history (scan --db)
+*.db
+
 # Personal study guide (contains interview answers)
 guide/
