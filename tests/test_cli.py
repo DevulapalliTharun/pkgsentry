@@ -1,7 +1,10 @@
 from pathlib import Path
 
-from pkgsentry.cli import _printable, format_code, format_fetch, main
+from pkgsentry import cli
+from pkgsentry.cli import _printable, format_code, format_fetch, format_scan, main
 from pkgsentry.analyzers.rules import Finding
+from pkgsentry.models import PackageInfo, ReleaseFile
+from pkgsentry.scoring import RiskReport, RiskSignal
 from pkgsentry.fetch.extract import ExtractionReport
 from pkgsentry.models import ReleaseFile
 
@@ -27,6 +30,36 @@ def test_format_code_shows_obfuscation_findings():
     text = format_code("demo 1.0 (sdist)", [finding])
     assert "invisible unicode" in text
     assert "medium" in text and "setup.py:4" in text
+
+
+def test_format_scan_shows_score_evidence_and_defangs_urls(tmp_path):
+    package = PackageInfo("demo", "1.0", "", "", "", "", 0, 1, None, ())
+    file = ReleaseFile("demo-1.0.tar.gz", "sdist", "https://files.pythonhosted.org/x", 100,
+                       "ab" * 32, None)
+    extraction = ExtractionReport(root=tmp_path, files=["demo-1.0/setup.py"], bytes_written=50)
+    report = RiskReport(42, "high", (RiskSignal("code", 30, "strong", "install",
+                                                "sends data to https://evil.example/x", "setup.py", 8),))
+    text = format_scan(package, file, tmp_path / "demo-1.0.tar.gz", extraction, report)
+    assert "Risk score  42/100  HIGH" in text
+    assert "+30  code" in text and "setup.py:8" in text
+    assert "hxxps://evil[.]example/x" in text and "https://evil.example" not in text
+    assert text.endswith("Nothing was installed or run.")
+
+
+def test_scan_command_runs_all_analyzers_without_network(tmp_path, monkeypatch, capsys):
+    package = PackageInfo("demo", "1.0", "summary", "author", "a@example.org", "https://example.org",
+                          500, 4, None, ())
+    file = ReleaseFile("demo-1.0.tar.gz", "sdist", "https://files.pythonhosted.org/x", 100,
+                       "ab" * 32, None)
+    extraction = ExtractionReport(root=tmp_path, files=[], bytes_written=0)
+    monkeypatch.setattr(cli, "_fetch", lambda args: (package, file, tmp_path / file.filename, extraction))
+    monkeypatch.setattr(cli, "find_hooks", lambda root, name, kind: [])
+    monkeypatch.setattr(cli, "check_name", lambda name: None)
+    monkeypatch.setattr(cli, "check_code", lambda root, kind, hooks: [])
+    monkeypatch.setattr(cli, "scan_obfuscation", lambda root, kind, hooks, findings: [])
+    monkeypatch.setattr(cli, "score_package", lambda package, names, hooks, findings: RiskReport(0, "low", ()))
+    assert main(["scan", "demo"]) == 0
+    assert "Risk score  0/100  LOW" in capsys.readouterr().out
 
 
 def test_check_name_command(capsys):

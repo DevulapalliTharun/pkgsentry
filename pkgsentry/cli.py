@@ -1,4 +1,4 @@
-"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks` and `code`."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code` and `scan`."""
 
 import argparse
 import re
@@ -16,6 +16,7 @@ from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
 from pkgsentry.models import PackageInfo, ReleaseFile
+from pkgsentry.scoring import RiskReport, score_package
 
 _URL_TEXT = re.compile(r"(?i)\bhttp(s?)://([^\s/'\"<>]+)")
 _IPV4_TEXT = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b")
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="fetch a package and list code that can run without being called (never installs or runs it)")
     commands.add_parser("code", parents=[download],
                         help="fetch a package and report what its code does, weighted by when it runs (never runs it)")
+    commands.add_parser("scan", parents=[download],
+                        help="run all current checks and print a risk score with evidence (never installs or runs it)")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -65,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
             findings = check_code(report.root, file.kind, hooks)
             findings.extend(scan_obfuscation(report.root, file.kind, hooks, findings))
             print(format_code(label, findings))
+        elif args.command == "scan":
+            package, file, archive, extraction = _fetch(args)
+            hooks = find_hooks(extraction.root, package.name, file.kind)
+            name_check = check_name(validate_name(package.name))
+            findings = check_code(extraction.root, file.kind, hooks)
+            findings.extend(scan_obfuscation(extraction.root, file.kind, hooks, findings))
+            result = score_package(package, name_check, hooks, findings)
+            print(format_scan(package, file, archive, extraction, result))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
@@ -175,6 +186,30 @@ def format_code(label: str, findings: list[Finding]) -> str:
         lines.append(f"  {counts['info']} info findings not shown: normal inside functions, tests or docs")
     lines.append("Nothing was installed or run.")
     return "\n".join(lines)
+
+
+def format_scan(package: PackageInfo, file: ReleaseFile, archive: Path,
+                extraction: ExtractionReport, result: RiskReport) -> str:
+    lines = [
+        f"{_printable(package.name)} {_printable(package.version)} ({file.kind})",
+        f"Risk score  {result.score}/100  {_level(result.level)}",
+        f"Source      {_short(archive)}  SHA-256 verified; {len(extraction.files)} files unpacked safely",
+        "Evidence:",
+    ]
+    if result.signals:
+        for signal in result.signals:
+            where = f"  {_printable(signal.path)}:{signal.line}" if signal.path else ""
+            lines.append(f"  +{signal.points:>2}  {signal.category:<14} {signal.context:<8} "
+                         f"{signal.strength:<6} {_printable(_defang(signal.detail))}{where}")
+    else:
+        lines.append("  No risk signals found in the selected file.")
+    lines.append("This is a triage score, not a malware verdict.")
+    lines.append("Nothing was installed or run.")
+    return "\n".join(lines)
+
+
+def _level(value: str) -> str:
+    return {"low": "LOW", "guarded": "GUARDED", "high": "HIGH", "critical": "CRITICAL"}.get(value, value.upper())
 
 
 def _printable(text: str) -> str:
