@@ -1,4 +1,4 @@
-"""Command line: `pkgsentry info` and `pkgsentry fetch`."""
+"""Command line: `pkgsentry info`, `pkgsentry fetch` and `pkgsentry check-name`."""
 
 import argparse
 import shutil
@@ -6,6 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from pkgsentry.analyzers.typosquat import NameCheck, check_name
 from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
@@ -29,6 +30,10 @@ def main(argv: list[str] | None = None) -> int:
     fetch.add_argument("--kind", choices=["sdist", "wheel"], default="sdist",
                        help="which file to fetch (default: sdist, where install-time code lives)")
     fetch.add_argument("--dest", type=Path, default=Path("downloads"), help="download folder (default: downloads/)")
+    check = commands.add_parser(
+        "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
+    )
+    check.add_argument("names", nargs="+", metavar="name", help="one or more package names")
     args = parser.parse_args(argv)
 
     try:
@@ -36,6 +41,9 @@ def main(argv: list[str] | None = None) -> int:
             print(format_info(get_package_info(args.name, args.version)))
         elif args.command == "fetch":
             print(_fetch(args))
+        elif args.command == "check-name":
+            checks = [check_name(validate_name(name)) for name in args.names]
+            print("\n\n".join(format_name_check(result) for result in checks))
     except (PyPIError, ExtractionError, ValueError) as error:
         print(f"error: {_printable(str(error))}", file=sys.stderr)
         return 1
@@ -94,6 +102,26 @@ def format_fetch(file: ReleaseFile, archive: Path, report: ExtractionReport) -> 
     return "\n".join(lines)
 
 
+def format_name_check(result: NameCheck) -> str:
+    lines = [f"{_printable(result.name)}  (PyPI reads it as: {_printable(result.normalized)})"]
+    if result.popular:
+        top = result.popular
+        lines.append(f"  A popular package itself: #{top.rank:,}, {_count(top.downloads)} downloads in 30 days.")
+    elif result.matches:
+        lines.append("  Looks like:")
+        width = max(len(m.target.name) for m in result.matches)
+        for m in result.matches:
+            lines.append(
+                f"    {m.strength:<6}  {m.target.name:<{width}}  #{m.target.rank:<6,}"
+                f"{_count(m.target.downloads):>7} downloads  {m.technique}"
+            )
+    else:
+        lines.append("  No popular package looks like this name.")
+    if result.stdlib_module:
+        lines.append("  Also a Python standard-library module name: people may pip install it by mistake.")
+    return "\n".join(lines)
+
+
 def _printable(text: str) -> str:
     # Names and metadata are attacker-controlled; raw control characters could rewrite the terminal.
     return "".join(ch if ch.isprintable() else "?" for ch in text)
@@ -107,3 +135,10 @@ def _short(path: Path) -> str:
 
 def _day(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d") if value else "unknown"
+
+
+def _count(number: int) -> str:
+    for size, unit in ((10**9, "B"), (10**6, "M"), (10**3, "K")):
+        if number >= size:
+            return f"{number / size:.1f}{unit}"
+    return str(number)

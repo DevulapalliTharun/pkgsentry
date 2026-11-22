@@ -18,6 +18,10 @@ pkgsentry = "pkgsentry.cli:main"
 [tool.setuptools.packages.find]
 include = ["pkgsentry*"]
 
+# Ship the popular-packages snapshot inside the built package.
+[tool.setuptools.package-data]
+pkgsentry = ["data/*.json"]
+
 # Never let pytest import code from downloaded packages.
 [tool.pytest.ini_options]
 testpaths = ["tests"]

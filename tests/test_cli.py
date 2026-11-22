@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pkgsentry.cli import _printable, format_fetch
+from pkgsentry.cli import _printable, format_fetch, main
 from pkgsentry.fetch.extract import ExtractionReport
 from pkgsentry.models import ReleaseFile
 
@@ -18,3 +18,15 @@ def test_format_fetch_shows_refused_entries_safely(tmp_path):
     assert "Refused     1 suspicious entries" in text
     assert "\x1b" not in text
     assert "Nothing was installed or run." in text
+
+
+def test_check_name_command(capsys):
+    assert main(["check-name", "reqeusts", "requests"]) == 0
+    out = capsys.readouterr().out
+    assert "strong" in out and "swapped letters" in out
+    assert "A popular package itself" in out
+
+
+def test_check_name_rejects_invalid_names(capsys):
+    assert main(["check-name", "../etc/passwd"]) == 1
+    assert "error:" in capsys.readouterr().err
