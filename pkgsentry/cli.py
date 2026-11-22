@@ -1,6 +1,7 @@
-"""Command line: `pkgsentry info`, `fetch`, `check-name` and `hooks`."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks` and `code`."""
 
 import argparse
+import re
 import shutil
 import sys
 from collections import Counter
@@ -8,11 +9,15 @@ from datetime import datetime
 from pathlib import Path
 
 from pkgsentry.analyzers.hooks import Hook, find_hooks
+from pkgsentry.analyzers.rules import Finding, check_code
 from pkgsentry.analyzers.typosquat import NameCheck, check_name
 from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
 from pkgsentry.models import PackageInfo, ReleaseFile
+
+_URL_TEXT = re.compile(r"(?i)\bhttp(s?)://([^\s/'\"<>]+)")
+_IPV4_TEXT = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="download a package file, verify its SHA-256 and unpack it safely (never installs or runs it)")
     commands.add_parser("hooks", parents=[download],
                         help="fetch a package and list code that can run without being called (never installs or runs it)")
+    commands.add_parser("code", parents=[download],
+                        help="fetch a package and report what its code does, weighted by when it runs (never runs it)")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -50,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
             package, file, _, report = _fetch(args)
             label = f"{package.name} {package.version} ({file.kind})"
             print(format_hooks(label, find_hooks(report.root, package.name, file.kind)))
+        elif args.command == "code":
+            package, file, _, report = _fetch(args)
+            label = f"{package.name} {package.version} ({file.kind})"
+            hooks = find_hooks(report.root, package.name, file.kind)
+            print(format_code(label, check_code(report.root, file.kind, hooks)))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
@@ -145,9 +157,32 @@ def format_hooks(label: str, hooks: list[Hook]) -> str:
     return "\n".join(lines)
 
 
+def format_code(label: str, findings: list[Finding]) -> str:
+    counts = Counter(f.strength for f in findings)
+    summary = ", ".join(f"{counts[s]} {s}" for s in ("strong", "medium", "weak", "info") if counts[s])
+    lines = [f"{_printable(label)}: what the code does ({summary or 'nothing found'})"]
+    for f in findings:
+        if f.strength == "info":
+            continue
+        lines.append(f"  {f.strength:<6}  {f.context:<7}  {_printable(f.path)}:{f.line}")
+        lines.append(f"          {f.rule}: {_printable(_defang(f.detail))}")
+        if f.evidence:
+            lines.append(f"          > {_printable(_defang(f.evidence))}")
+    if counts["info"]:
+        lines.append(f"  {counts['info']} info findings not shown: normal inside functions, tests or docs")
+    lines.append("Nothing was installed or run.")
+    return "\n".join(lines)
+
+
 def _printable(text: str) -> str:
     # Names and metadata are attacker-controlled; raw control characters could rewrite the terminal.
     return "".join(ch if ch.isprintable() else "?" for ch in text)
+
+
+def _defang(text: str) -> str:
+    """Indicators in reports must not be clickable: hxxps://evil[.]example, 203[.]0[.]113[.]5."""
+    text = _URL_TEXT.sub(lambda m: f"hxxp{m.group(1)}://{m.group(2).replace('.', '[.]')}", text)
+    return _IPV4_TEXT.sub(lambda m: "[.]".join(m.groups()), text)
 
 
 def _short(path: Path) -> str:

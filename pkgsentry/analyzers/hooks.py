@@ -8,6 +8,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from pkgsentry.analyzers.source import dotted, full_name, import_aliases, parse_source, read_text
 from pkgsentry.analyzers.typosquat import Popular, check_name, normalize
 
 # setuptools steps a package can replace (cmdclass): when pip runs each one, and how unusual replacing it is.
@@ -51,7 +52,6 @@ _STRENGTH_ORDER = {"strong": 0, "medium": 1, "weak": 2, "info": 3}
 _REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 _EXTRA_MARKER = re.compile(r";.*\bextra\s*==")  # optional extras install only when asked for by name
 _VERSIONED = re.compile(r"(python|pip)[\d.]*")  # python3.14 -> python, pip3 -> pip
-_MAX_PARSE_BYTES = 5 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class _Scan:
         self.package = normalize(package)
         self.popular = popular
         self.wheel = wheel
-        self.top = "" if wheel else _single_top_folder(self.files)  # an sdist unpacks into "name-version/"
+        self.top = "" if wheel else single_top_folder(self.files)  # an sdist unpacks into "name-version/"
         self.hooks: list[Hook] = []
         self.commands: dict[str, str] = {}  # command -> file that declares it
         self.requirements: dict[str, tuple[str, str]] = {}  # normalized name -> (name, file)
@@ -103,12 +103,12 @@ class _Scan:
     def setup_py(self, rel: str) -> None:
         self.add("download", "setup.py", rel, 0,
                  "pip runs this whole file to learn the package's details, even for 'pip download'", "info")
-        tree = _parse(self.files[rel])
+        tree = parse_source(self.files[rel])
         if tree is None:
             self.add("download", "unreadable setup.py", rel, 0,
                      "not valid Python 3 (or over 5 MB), so it cannot be checked without running it", "weak")
             return
-        aliases = _import_aliases(tree)
+        aliases = import_aliases(tree)
         assigned = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
                     for target in node.targets if isinstance(target, ast.Name)}
         keywords = _setup_keywords(tree, aliases, assigned)
@@ -117,14 +117,18 @@ class _Scan:
             self.step_hook(step, rel, line, code)
         if isinstance(cmdclass, ast.Call) and not _keyword_dict(cmdclass):
             self.add("download", "custom steps computed at run time", rel, cmdclass.lineno,
-                     f"cmdclass comes from {_dotted(cmdclass.func) or 'a function call'}(), so the steps it replaces "
+                     f"cmdclass comes from {dotted(cmdclass.func) or 'a function call'}(), so the steps it replaces "
                      f"cannot be listed without running setup.py", "info")
-        for module in sorted({name.split(".")[0] for name in aliases.values()}):
+        loaded = set()
+        for name in sorted(set(aliases.values())):
+            parts = name.split(".")  # importing a.b.c runs a/__init__.py, a/b/__init__.py and a/b/c.py
             for folder in (self.top, f"{self.top}src/"):
-                for candidate in (f"{folder}{module}.py", f"{folder}{module}/__init__.py"):
-                    if candidate in self.files:
-                        self.add("download", "module run by setup.py", candidate, 0,
-                                 f"setup.py imports '{module}', so this file runs whenever setup.py does", "info")
+                for i in range(1, len(parts) + 1):
+                    sub = "/".join(parts[:i])
+                    loaded |= {c for c in (f"{folder}{sub}.py", f"{folder}{sub}/__init__.py") if c in self.files}
+        for candidate in sorted(loaded - {rel}):
+            self.add("download", "module run by setup.py", candidate, 0,
+                     "setup.py imports this module, so it runs whenever setup.py does", "info")
         for command in _entry_point_names(_literal(keywords.get("entry_points"), assigned)):
             self.commands.setdefault(command, rel)
         for script in _strings(keywords.get("scripts"), assigned):
@@ -150,7 +154,7 @@ class _Scan:
     def setup_cfg(self, rel: str) -> None:
         parser = configparser.ConfigParser(interpolation=None, strict=False)
         try:
-            parser.read_string(_read(self.files[rel]))
+            parser.read_string(read_text(self.files[rel]))
         except configparser.Error:
             return
         options = parser["options"] if parser.has_section("options") else {}
@@ -170,7 +174,7 @@ class _Scan:
 
     def pyproject(self, rel: str) -> None:
         try:
-            data = tomllib.loads(_read(self.files[rel]))
+            data = tomllib.loads(read_text(self.files[rel]))
         except (ValueError, RecursionError):
             return  # pip refuses to build a package whose pyproject.toml is invalid
         build = _table(data.get("build-system"))
@@ -182,6 +186,7 @@ class _Scan:
                      f"pip builds this package with its own build code ('{backend}'), even for 'pip download'", "info")
         for requirement in _str_list(build.get("requires")):
             self.require(self.build_requirements, requirement, rel)
+        self.build_tool_hooks(data, backend)
         project = _table(data.get("project"))
         for group in ("scripts", "gui-scripts"):
             for command in _table(project.get(group)):
@@ -197,6 +202,31 @@ class _Scan:
         for files in _table(setuptools.get("data-files")).values():
             for name in _str_list(files):
                 self.pth_data_file(PurePosixPath(name).name, rel, 0)
+
+    def build_tool_hooks(self, data: dict, backend: object) -> None:
+        """Build tools that run a Python file of the package while building it: hatchling custom hooks
+        (hatch_build.py by default), pdm-backend (pdm_build.py) and Poetry build scripts."""
+        tool = _table(data.get("tool"))
+        hatch = _table(tool.get("hatch"))
+        build = _table(hatch.get("build"))
+        found: list[tuple[object, str]] = []
+        for hooks in [_table(build.get("hooks")), *(_table(_table(t).get("hooks"))
+                                                    for t in _table(build.get("targets")).values())]:
+            if "custom" in hooks:
+                found.append((_table(hooks["custom"]).get("path", "hatch_build.py"), "install"))
+        metadata_hooks = _table(_table(hatch.get("metadata")).get("hooks"))
+        if "custom" in metadata_hooks:
+            found.append((_table(metadata_hooks["custom"]).get("path", "hatch_build.py"), "download"))
+        if isinstance(backend, str) and backend.startswith("pdm.backend"):
+            found.append(("pdm_build.py", "install"))
+        poetry_build = _table(tool.get("poetry")).get("build")
+        found.append((_table(poetry_build).get("script") if isinstance(poetry_build, dict) else poetry_build, "install"))
+        for path, when in found:
+            candidate = f"{self.top}{PurePosixPath(path)}" if isinstance(path, str) else ""
+            if candidate in self.files:
+                self.add(when, "custom build hook", candidate, 0,
+                         f"the build tool runs this file while building the package"
+                         f"{', even for pip download' if when == 'download' else ''}", "info")
 
     def metadata_file(self, rel: str, path: Path) -> None:
         parts = PurePosixPath(rel).parts
@@ -214,17 +244,17 @@ class _Scan:
 
     def metadata(self, name: str, rel: str, path: Path) -> None:
         if name == "METADATA":
-            for requirement in _requires_dist(_read(path)):
+            for requirement in _requires_dist(read_text(path)):
                 self.require(self.requirements, requirement, rel)
         elif name == "requires.txt":
             optional = False
-            for line in _read(path).splitlines():
+            for line in read_text(path).splitlines():
                 if line.startswith("["):
                     optional = not line.startswith("[:")  # "[extra]" starts optional extras; "[:marker]" does not
                 elif not optional and line.strip() and not line.lstrip().startswith("#"):
                     self.require(self.requirements, line, rel)
         elif name == "entry_points.txt":
-            for command in _ini_commands(_read(path)):
+            for command in _ini_commands(read_text(path)):
                 self.commands.setdefault(command, rel)
 
     def startup_file(self, rel: str, path: Path) -> None:
@@ -234,7 +264,7 @@ class _Scan:
         # A wheel's top level is copied into site-packages; an sdist's files get there only if setup.py says so.
         certain = self.wheel
         if site.endswith(".pth") and "/" not in site:
-            for number, line in enumerate(_read(path).splitlines(), 1):
+            for number, line in enumerate(read_text(path).splitlines(), 1):
                 if line.startswith(("import ", "import\t")):
                     where = "Python runs" if certain else "If this file is installed into site-packages, Python runs"
                     self.add("startup", ".pth startup code", rel, number,
@@ -290,22 +320,9 @@ class _Scan:
                              f"one", "weak")
 
 
-def _single_top_folder(files: dict[str, Path]) -> str:
+def single_top_folder(files: dict[str, Path]) -> str:
     tops = {rel.split("/")[0] for rel in files}
     return f"{tops.pop()}/" if len(tops) == 1 and all("/" in rel for rel in files) else ""
-
-
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _parse(path: Path) -> ast.Module | None:
-    if path.stat().st_size > _MAX_PARSE_BYTES:
-        return None
-    try:
-        return ast.parse(path.read_bytes())
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return None
 
 
 def _table(value: object) -> dict:
@@ -314,35 +331,6 @@ def _table(value: object) -> dict:
 
 def _str_list(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
-
-
-def _dotted(node: ast.AST | None) -> str:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value)
-        return f"{base}.{node.attr}" if base else ""
-    return ""
-
-
-def _import_aliases(tree: ast.Module) -> dict[str, str]:
-    """Local name -> what it was imported as, e.g. _install -> setuptools.command.install.install."""
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                top = alias.name.split(".")[0]
-                aliases[alias.asname or top] = alias.name if alias.asname else top
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return aliases
-
-
-def _full_name(node: ast.AST, aliases: dict[str, str]) -> str:
-    head, _, rest = _dotted(node).partition(".")
-    full = aliases.get(head, head)
-    return f"{full}.{rest}" if rest else full
 
 
 def _resolve(node: ast.AST | None, assigned: dict[str, ast.AST]) -> ast.AST | None:
@@ -354,7 +342,7 @@ def _keyword_dict(node: ast.AST | None) -> dict[str, ast.AST]:
     if isinstance(node, ast.Dict):
         return {k.value: v for k, v in zip(node.keys, node.values)
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-    if isinstance(node, ast.Call) and _dotted(node.func) == "dict":
+    if isinstance(node, ast.Call) and dotted(node.func) == "dict":
         return {k.arg: k.value for k in node.keywords if k.arg}
     return {}
 
@@ -362,7 +350,7 @@ def _keyword_dict(node: ast.AST | None) -> dict[str, ast.AST]:
 def _setup_keywords(tree: ast.Module, aliases: dict[str, str], assigned: dict[str, ast.AST]) -> dict[str, ast.AST]:
     keywords: dict[str, ast.AST] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _full_name(node.func, aliases) in _SETUP_FUNCTIONS:
+        if isinstance(node, ast.Call) and full_name(node.func, aliases) in _SETUP_FUNCTIONS:
             for keyword in node.keywords:
                 if keyword.arg:
                     keywords.setdefault(keyword.arg, keyword.value)
@@ -378,7 +366,7 @@ def _command_classes(tree: ast.Module, aliases: dict[str, str], cmdclass: ast.AS
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
-                full = _full_name(base, aliases)
+                full = full_name(base, aliases)
                 step = subclasses[full][0] if full in subclasses else full.rpartition(".")[2]
                 if (full in subclasses or full.startswith(_STEP_MODULES)) and step in _STEPS:
                     subclasses[node.name] = (step, node.lineno)
@@ -392,12 +380,12 @@ def _command_classes(tree: ast.Module, aliases: dict[str, str], cmdclass: ast.AS
         if step not in _STEPS:
             continue  # an extra command such as "python setup.py verify"; pip never runs it
         if isinstance(value, ast.Call):
-            found[f"a class built by {_dotted(value.func) or 'a function'}()"] = (step, value.lineno)
+            found[f"a class built by {dotted(value.func) or 'a function'}()"] = (step, value.lineno)
             continue
-        name = _dotted(value)
+        name = dotted(value)
         if name in defined:
             found[f"class {name}"] = (step, defined[name])
-        elif not _full_name(value, aliases).startswith(_STEP_MODULES):
+        elif not full_name(value, aliases).startswith(_STEP_MODULES):
             found[f"{name or 'a class'} (defined outside setup.py)"] = (step, value.lineno)
     return found
 
