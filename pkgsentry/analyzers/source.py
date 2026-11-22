@@ -1,6 +1,7 @@
 """Read and parse untrusted Python source. Parsing builds a tree of the code; it never imports or runs it."""
 
 import ast
+import importlib.util
 import warnings
 from pathlib import Path
 
@@ -9,7 +10,18 @@ _DYNAMIC_IMPORTS = {"__import__", "importlib.import_module"}
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
+    # utf-8-sig drops a leading byte-order mark, as Python's site module does for .pth files.
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def read_source(path: Path) -> str:
+    """Decode a .py file exactly as Python does (coding declaration, byte-order mark, and only \\n, \\r\\n, \\r as
+    line breaks), so source.split("\\n")[n - 1] is the line the parser calls n. str.splitlines() is not."""
+    data = path.read_bytes()
+    try:
+        return importlib.util.decode_source(data)
+    except (SyntaxError, UnicodeError, LookupError):  # Python would refuse this file too
+        return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def parse_source(path: Path) -> ast.Module | None:

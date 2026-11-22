@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from pkgsentry.analyzers.hooks import Hook, single_top_folder
-from pkgsentry.analyzers.source import dotted, full_name, import_aliases, parse_source, parse_text, read_text
+from pkgsentry.analyzers.source import dotted, full_name, import_aliases, parse_source, parse_text, read_source, read_text
 
 # install: setup.py and code it loads; startup: .pth lines; import: module top level and functions it calls;
 # call: runs only when someone calls it; dev: tests, docs, examples and scripts that are not installed.
@@ -290,7 +290,7 @@ def _named_by(trees: dict[str, ast.Module | None], sources: set[str]) -> set[str
 
 def _check_file(path: Path, rel: str, context: str, tree: ast.Module | None,
                 top_level: str = "import") -> list[Finding]:
-    lines = read_text(path).splitlines()
+    lines = read_source(path).split("\n")
     if tree is not None:
         visitor = _Visitor(tree, rel, lines, context, top_level=top_level)
         try:

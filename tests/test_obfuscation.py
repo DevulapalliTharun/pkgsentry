@@ -103,6 +103,21 @@ def test_bidi_control_in_comment_is_reported(tmp_path):
     assert "U+202E" in hidden.detail
 
 
+def test_evidence_is_the_line_python_reads(tmp_path):
+    findings = scan(tmp_path, {"demo-1.0/demo/text.py": "# a\u2028b\nlabel = 'x\u202ey'\n"})
+    hidden = next(f for f in findings if f.rule == "invisible unicode")
+    assert (hidden.line, hidden.evidence) == (2, "label = 'x\u202ey'")
+
+
+def test_declared_source_encoding_does_not_hide_a_file(tmp_path):
+    encoded = base64.b64encode(("import subprocess; subprocess.run(['ls'])\n" * 4).encode()).decode()
+    path = tmp_path / "demo-1.0/demo/__init__.py"
+    path.parent.mkdir(parents=True)
+    # Valid Python because of the coding line, but not valid UTF-8 because of the byte 0xE9.
+    path.write_bytes(f"# -*- coding: latin-1 -*-\n# caf\xe9\npayload = \"{encoded}\"\n".encode("latin-1"))
+    assert [(f.rule, f.line) for f in scan(tmp_path, {})] == [("encoded code", 3)]
+
+
 def test_tokenizer_memory_error_falls_back_to_bidi_scan(tmp_path, monkeypatch):
     import pkgsentry.analyzers.obfuscation as obfuscation
 

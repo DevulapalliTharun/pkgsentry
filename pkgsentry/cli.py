@@ -1,4 +1,4 @@
-"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code` and `scan`."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code` and `scan` (with optional `--ai`)."""
 
 import argparse
 import re
@@ -17,6 +17,10 @@ from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extr
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
 from pkgsentry.models import PackageInfo, ReleaseFile
 from pkgsentry.scoring import RiskReport, score_package
+from pkgsentry.triage.evidence import Excerpt, build_evidence
+from pkgsentry.triage.gemini import MODEL, GeminiError, generate_json, load_api_key
+from pkgsentry.triage.prompt import SCHEMA, SYSTEM, build_prompt
+from pkgsentry.triage.verify import Decision, Verified, decide, verify
 
 _URL_TEXT = re.compile(r"(?i)\bhttp(s?)://([^\s/'\"<>]+)")
 _IPV4_TEXT = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b")
@@ -43,8 +47,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="fetch a package and list code that can run without being called (never installs or runs it)")
     commands.add_parser("code", parents=[download],
                         help="fetch a package and report what its code does, weighted by when it runs (never runs it)")
-    commands.add_parser("scan", parents=[download],
-                        help="run all current checks and print a risk score with evidence (never installs or runs it)")
+    scan = commands.add_parser("scan", parents=[download],
+                               help="run all current checks and print a risk score with evidence (never installs or runs it)")
+    scan.add_argument("--ai", action="store_true",
+                      help="if the score is above LOW, ask Gemini to explain the flagged lines; every claim is verified")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -76,10 +82,14 @@ def main(argv: list[str] | None = None) -> int:
             findings.extend(scan_obfuscation(extraction.root, file.kind, hooks, findings))
             result = score_package(package, name_check, hooks, findings)
             print(format_scan(package, file, archive, extraction, result))
+            if args.ai:
+                label = f"{package.name} {package.version} ({file.kind})"
+                print()
+                print(_triage(label, extraction.root, hooks, findings, result))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
-    except (PyPIError, ExtractionError, ValueError) as error:
+    except (PyPIError, ExtractionError, GeminiError, ValueError) as error:
         print(f"error: {_printable(str(error))}", file=sys.stderr)
         return 1
     return 0
@@ -205,6 +215,49 @@ def format_scan(package: PackageInfo, file: ReleaseFile, archive: Path,
         lines.append("  No risk signals found in the selected file.")
     lines.append("This is a triage score, not a malware verdict.")
     lines.append("Nothing was installed or run.")
+    return "\n".join(lines)
+
+
+def _triage(label: str, root: Path, hooks: list[Hook], findings: list[Finding], result: RiskReport) -> str:
+    if result.level == "low":
+        return "AI triage   skipped: the rule score is LOW, and the AI only reviews flagged packages"
+    excerpts = build_evidence(root, hooks, findings)
+    if not excerpts:
+        return "AI triage   skipped: the rules flagged no code lines to show the AI"
+    answer, tokens = generate_json(SYSTEM, build_prompt(label, hooks, findings, excerpts), SCHEMA, load_api_key())
+    verified = verify(answer, excerpts)
+    return format_triage(excerpts, verified, decide(result.level, verified, any(e.injection for e in excerpts)),
+                         tokens)
+
+
+def format_triage(excerpts: list[Excerpt], verified: Verified, decision: Decision, tokens: int) -> str:
+    # The model's text is untrusted too: it may repeat attacker strings, so it is printed like package data.
+    shown = "1 excerpt (C1)" if len(excerpts) == 1 else f"{len(excerpts)} excerpts (C1-C{len(excerpts)})"
+    lines = [
+        f"AI triage   {MODEL} read {shown}, {tokens:,} tokens",
+        f"AI verdict  {verified.verdict}",
+        f"Final level {_level(decision.level)}: {decision.reason}",
+    ]
+    if verified.behaviors:
+        lines.append("Behaviours (each cites an excerpt that exists):")
+        lines += [f"  [{', '.join(b.citations)}] {_printable(_defang(b.description))}" for b in verified.behaviors]
+    if verified.indicators:
+        lines.append("Indicators (each found word for word in the excerpts):")
+        for indicator in verified.indicators:
+            value = _defang(indicator.value)
+            if indicator.kind == "domain":
+                value = value.replace(".", "[.]")
+            lines.append(f"  {indicator.kind:<9} {_printable(value)}  [{', '.join(indicator.found_in)}]")
+    if verified.summary:
+        lines.append(f"Summary     {_printable(_defang(verified.summary))}")
+    for note in verified.dropped[:6]:
+        lines.append(f"Verifier    dropped {_printable(_defang(note))}")
+    if len(verified.dropped) > 6:
+        lines.append(f"Verifier    ... and {len(verified.dropped) - 6} more dropped items")
+    aimed = [e.tag for e in excerpts if e.injection]
+    if aimed:
+        lines.append(f"Warning     text aimed at AI reviewers in {', '.join(aimed)}: possible prompt injection")
+    lines.append("The AI saw only these excerpts. It could not run code, and it cannot change the rule score.")
     return "\n".join(lines)
 
 

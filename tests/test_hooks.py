@@ -240,6 +240,11 @@ def test_sdist_startup_files_are_weaker_until_installed(tmp_path):
     ]
 
 
+def test_pth_byte_order_mark_does_not_hide_startup_code(tmp_path):
+    hooks = scan(tmp_path, {"demo.pth": "\ufeffimport demo_startup\n", "demo/__init__.py": ""}, kind="wheel")
+    assert summary(hooks) == [(".pth startup code", "medium")]
+
+
 def test_archive_layout_cannot_disguise_an_sdist_as_a_wheel(tmp_path):
     hooks = scan(tmp_path, {
         "demo-1.0/setup.py": "from setuptools import setup\nsetup(name='demo')\n",
