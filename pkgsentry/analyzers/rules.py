@@ -177,6 +177,14 @@ def check_code(root: Path, kind: str, hooks: list[Hook]) -> list[Finding]:
     return sorted(unique.values(), key=lambda f: (_ORDER[f.strength], f.path, f.line, f.rule))
 
 
+def development_files(root: Path, kind: str) -> set[str]:
+    """Return source files Step 5 classifies as tests/docs/helpers rather than installed package code."""
+    paths = {p.relative_to(root).as_posix(): p for p in sorted(root.rglob("*.py")) if p.is_file()}
+    top = "" if kind == "wheel" else single_top_folder(paths)
+    trees = {rel: parse_source(path) for rel, path in paths.items()}
+    return _dev_files(root, paths, trees, top, kind)
+
+
 def _dev_files(root: Path, paths: dict[str, Path], trees: dict[str, ast.Module | None], top: str,
                kind: str) -> set[str]:
     """Files that are never installed or run for a user: tests, docs, examples and helper scripts. Location alone is

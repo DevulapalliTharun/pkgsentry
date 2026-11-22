@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from pkgsentry.cli import _printable, format_fetch, main
+from pkgsentry.cli import _printable, format_code, format_fetch, main
+from pkgsentry.analyzers.rules import Finding
 from pkgsentry.fetch.extract import ExtractionReport
 from pkgsentry.models import ReleaseFile
 
@@ -18,6 +19,14 @@ def test_format_fetch_shows_refused_entries_safely(tmp_path):
     assert "Refused     1 suspicious entries" in text
     assert "\x1b" not in text
     assert "Nothing was installed or run." in text
+
+
+def test_format_code_shows_obfuscation_findings():
+    finding = Finding("invisible unicode", "demo/setup.py", 4, "install", "medium",
+                      "contains invisible formatting characters: U+202E RIGHT-TO-LEFT OVERRIDE", "name = 'evil'")
+    text = format_code("demo 1.0 (sdist)", [finding])
+    assert "invisible unicode" in text
+    assert "medium" in text and "setup.py:4" in text
 
 
 def test_check_name_command(capsys):

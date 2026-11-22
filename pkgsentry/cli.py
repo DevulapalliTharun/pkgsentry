@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pkgsentry.analyzers.hooks import Hook, find_hooks
+from pkgsentry.analyzers.obfuscation import scan_obfuscation
 from pkgsentry.analyzers.rules import Finding, check_code
 from pkgsentry.analyzers.typosquat import NameCheck, check_name
 from pkgsentry.fetch.download import download_file
@@ -61,7 +62,9 @@ def main(argv: list[str] | None = None) -> int:
             package, file, _, report = _fetch(args)
             label = f"{package.name} {package.version} ({file.kind})"
             hooks = find_hooks(report.root, package.name, file.kind)
-            print(format_code(label, check_code(report.root, file.kind, hooks)))
+            findings = check_code(report.root, file.kind, hooks)
+            findings.extend(scan_obfuscation(report.root, file.kind, hooks, findings))
+            print(format_code(label, findings))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
