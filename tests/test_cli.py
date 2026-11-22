@@ -1,0 +1,20 @@
+from pathlib import Path
+
+from pkgsentry.cli import _printable, format_fetch
+from pkgsentry.fetch.extract import ExtractionReport
+from pkgsentry.models import ReleaseFile
+
+
+def test_printable_neutralises_terminal_control_characters():
+    assert _printable("evil\x1b[2Jname\r\n") == "evil?[2Jname??"
+    assert _printable("Árfigyelő-api") == "Árfigyelő-api"
+
+
+def test_format_fetch_shows_refused_entries_safely(tmp_path):
+    file = ReleaseFile("demo-1.0.tar.gz", "sdist", "https://files.pythonhosted.org/x", 2048, "ab" * 32, None)
+    report = ExtractionReport(root=tmp_path, files=["demo-1.0/setup.py"], bytes_written=100,
+                              skipped=[("../\x1b[31mevil", "path traversal (..)")])
+    text = format_fetch(file, tmp_path / "demo-1.0.tar.gz", report)
+    assert "Refused     1 suspicious entries" in text
+    assert "\x1b" not in text
+    assert "Nothing was installed or run." in text

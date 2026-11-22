@@ -17,3 +17,8 @@ pkgsentry = "pkgsentry.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pkgsentry*"]
+
+# Never let pytest import code from downloaded packages.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["downloads", "samples", "guide", ".*", "venv", "build", "dist", "*.egg-info"]
