@@ -1,11 +1,13 @@
-"""Command line: `pkgsentry info`, `pkgsentry fetch` and `pkgsentry check-name`."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name` and `hooks`."""
 
 import argparse
 import shutil
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from pkgsentry.analyzers.hooks import Hook, find_hooks
 from pkgsentry.analyzers.typosquat import NameCheck, check_name
 from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
@@ -22,14 +24,16 @@ def main(argv: list[str] | None = None) -> int:
     info = commands.add_parser("info", help="show what PyPI knows about a package")
     info.add_argument("name", help="package name, for example: requests")
     info.add_argument("--version", help="a specific version (default: latest)")
-    fetch = commands.add_parser(
-        "fetch", help="download a package file, verify its SHA-256 and unpack it safely (never installs or runs it)"
-    )
-    fetch.add_argument("name", help="package name, for example: requests")
-    fetch.add_argument("--version", help="a specific version (default: latest)")
-    fetch.add_argument("--kind", choices=["sdist", "wheel"], default="sdist",
-                       help="which file to fetch (default: sdist, where install-time code lives)")
-    fetch.add_argument("--dest", type=Path, default=Path("downloads"), help="download folder (default: downloads/)")
+    download = argparse.ArgumentParser(add_help=False)
+    download.add_argument("name", help="package name, for example: requests")
+    download.add_argument("--version", help="a specific version (default: latest)")
+    download.add_argument("--kind", choices=["sdist", "wheel"], default="sdist",
+                          help="which file to fetch (default: sdist, where install-time code lives)")
+    download.add_argument("--dest", type=Path, default=Path("downloads"), help="download folder (default: downloads/)")
+    commands.add_parser("fetch", parents=[download],
+                        help="download a package file, verify its SHA-256 and unpack it safely (never installs or runs it)")
+    commands.add_parser("hooks", parents=[download],
+                        help="fetch a package and list code that can run without being called (never installs or runs it)")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -40,7 +44,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "info":
             print(format_info(get_package_info(args.name, args.version)))
         elif args.command == "fetch":
-            print(_fetch(args))
+            _, file, archive, report = _fetch(args)
+            print(format_fetch(file, archive, report))
+        elif args.command == "hooks":
+            package, file, _, report = _fetch(args)
+            label = f"{package.name} {package.version} ({file.kind})"
+            print(format_hooks(label, find_hooks(report.root, package.name, file.kind)))
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
@@ -50,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _fetch(args: argparse.Namespace) -> str:
+def _fetch(args: argparse.Namespace) -> tuple[PackageInfo, ReleaseFile, Path, ExtractionReport]:
     package = get_package_info(args.name, args.version)
     file = next((f for f in package.files if f.kind == args.kind), None)
     if file is None:
@@ -60,7 +69,7 @@ def _fetch(args: argparse.Namespace) -> str:
     archive = download_file(file, folder)
     extracted = folder / file.kind
     shutil.rmtree(extracted, ignore_errors=True)
-    return format_fetch(file, archive, safe_extract(archive, extracted))
+    return package, file, archive, safe_extract(archive, extracted)
 
 
 def format_info(package: PackageInfo) -> str:
@@ -119,6 +128,20 @@ def format_name_check(result: NameCheck) -> str:
         lines.append("  No popular package looks like this name.")
     if result.stdlib_module:
         lines.append("  Also a Python standard-library module name: people may pip install it by mistake.")
+    return "\n".join(lines)
+
+
+def format_hooks(label: str, hooks: list[Hook]) -> str:
+    counts = Counter(h.strength for h in hooks)
+    summary = ", ".join(f"{counts[s]} {s}" for s in ("strong", "medium", "weak", "info") if counts[s])
+    lines = [f"{_printable(label)}: code that can run without being called" + (f" ({summary})" if hooks else "")]
+    for h in hooks:
+        where = f"{h.path}:{h.line}" if h.line else h.path
+        lines.append(f"  {h.strength:<6}  {h.when:<16}  {_printable(where)}")
+        lines.append(f"          {_printable(h.kind)}: {_printable(h.detail)}")
+    if not hooks:
+        lines.append("  None found: no setup.py, build hooks, startup files or command names.")
+    lines.append("Nothing was installed or run.")
     return "\n".join(lines)
 
 
