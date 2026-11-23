@@ -1,8 +1,7 @@
-"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code`, `scan` (with optional `--ai` and `--db`)
-and `campaigns`."""
+"""Command line: `pkgsentry info`, `fetch`, `check-name`, `hooks`, `code`, `scan` (with optional `--ai` and `--db`),
+`campaigns` and `serve`."""
 
 import argparse
-import re
 import shutil
 import sys
 from collections import Counter
@@ -13,20 +12,21 @@ from pkgsentry.analyzers.hooks import Hook, find_hooks
 from pkgsentry.analyzers.obfuscation import scan_obfuscation
 from pkgsentry.analyzers.rules import Finding, check_code
 from pkgsentry.analyzers.typosquat import NameCheck, check_name
-from pkgsentry.campaigns import Indicator, extract_indicators, link
+from pkgsentry.campaigns import Indicator, link
 from pkgsentry.fetch.download import download_file
 from pkgsentry.fetch.extract import ExtractionError, ExtractionReport, safe_extract
 from pkgsentry.fetch.pypi import PyPIError, get_package_info, validate_name, validate_version
 from pkgsentry.models import PackageInfo, ReleaseFile
-from pkgsentry.scoring import RiskReport, score_package
+from pkgsentry.pipeline import Analysis, analyze
+from pkgsentry.safe import defang as _defang
+from pkgsentry.safe import printable as _printable
+from pkgsentry.safe import show_key as _show_key
+from pkgsentry.scoring import LEVELS, RiskReport
 from pkgsentry.storage import StoredScan, load_scans, save_scan
-from pkgsentry.triage.evidence import Excerpt, build_evidence
+from pkgsentry.triage.evidence import Excerpt
 from pkgsentry.triage.gemini import MODEL, GeminiError, generate_json, load_api_key
 from pkgsentry.triage.prompt import SCHEMA, SYSTEM, build_prompt
-from pkgsentry.triage.verify import LEVELS, Decision, Verified, decide, verify
-
-_URL_TEXT = re.compile(r"(?i)\bhttp(s?)://([^\s/'\"<>]+)")
-_IPV4_TEXT = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b")
+from pkgsentry.triage.verify import Decision, Verified, decide, verify
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--db", type=Path, help="save the result to this SQLite file and show links to earlier scans")
     campaigns = commands.add_parser("campaigns", help="group saved scans that share attacker-specific infrastructure")
     campaigns.add_argument("--db", type=Path, required=True, help="the SQLite file written by scan --db")
+    serve = commands.add_parser("serve", help="open the read-only dashboard for a scan history (needs the web extra)")
+    serve.add_argument("--db", type=Path, required=True, help="the SQLite file written by scan --db")
+    serve.add_argument("--host", default="127.0.0.1", help="address to listen on (default: 127.0.0.1, this machine only)")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--allow-remote", action="store_true",
+                       help="allow a non-local --host; the dashboard has no login, so put it behind one")
     check = commands.add_parser(
         "check-name", help="does a name imitate a popular package? (compares names only, downloads nothing)"
     )
@@ -82,29 +88,27 @@ def main(argv: list[str] | None = None) -> int:
             print(format_code(label, findings))
         elif args.command == "scan":
             package, file, archive, extraction = _fetch(args)
-            hooks = find_hooks(extraction.root, package.name, file.kind)
-            name_check = check_name(validate_name(package.name))
-            findings = check_code(extraction.root, file.kind, hooks)
-            findings.extend(scan_obfuscation(extraction.root, file.kind, hooks, findings))
-            result = score_package(package, name_check, hooks, findings)
-            indicators = extract_indicators(extraction.root, findings)
+            analysis = analyze(extraction.root, package, file.kind)
+            result, indicators = analysis.risk, analysis.indicators
             print(format_scan(package, file, archive, extraction, result))
             if indicators:
                 print()
                 print(format_indicators(indicators))
             if args.db:
                 save_scan(args.db, package.name, package.version, file.kind, file.sha256, result.score, result.level,
-                          indicators)
+                          indicators, result.signals, analysis.excerpts)
                 print()
                 print(format_links(package.name, indicators, load_scans(args.db)))
             if args.ai:
                 label = f"{package.name} {package.version} ({file.kind})"
                 print()
-                print(_triage(label, extraction.root, hooks, findings, result))
+                print(_triage(label, analysis))
         elif args.command == "campaigns":
             if not args.db.is_file():
                 raise ValueError(f"no scan history at {args.db}; run scan --db {args.db} first")
             print(format_campaigns(load_scans(args.db)))
+        elif args.command == "serve":
+            _serve(args)
         elif args.command == "check-name":
             checks = [check_name(validate_name(name)) for name in args.names]
             print("\n\n".join(format_name_check(result) for result in checks))
@@ -282,15 +286,30 @@ def format_campaigns(scans: list[StoredScan]) -> str:
     return "\n".join(lines)
 
 
-def _triage(label: str, root: Path, hooks: list[Hook], findings: list[Finding], result: RiskReport) -> str:
-    if result.level == "low":
+def _serve(args: argparse.Namespace) -> None:
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and not args.allow_remote:
+        raise ValueError(f"refusing to listen on {args.host}: the dashboard has no login and shows attacker code. "
+                         "Use --allow-remote only behind something that authenticates.")
+    try:
+        import uvicorn
+        from pkgsentry.web.app import create_app
+    except ImportError:
+        raise ValueError("the dashboard needs extra packages: pip install 'pkgsentry[web]'") from None
+    app = create_app(args.db, [args.host, "localhost", "127.0.0.1"])
+    print(f"PkgSentry dashboard on http://{args.host}:{args.port}  (read-only, Ctrl+C to stop)")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", server_header=False)
+
+
+def _triage(label: str, analysis: Analysis) -> str:
+    if analysis.risk.level == "low":
         return "AI triage   skipped: the rule score is LOW, and the AI only reviews flagged packages"
-    excerpts = build_evidence(root, hooks, findings)
+    excerpts = analysis.excerpts
     if not excerpts:
         return "AI triage   skipped: the rules flagged no code lines to show the AI"
-    answer, tokens = generate_json(SYSTEM, build_prompt(label, hooks, findings, excerpts), SCHEMA, load_api_key())
+    prompt = build_prompt(label, analysis.hooks, analysis.findings, excerpts)
+    answer, tokens = generate_json(SYSTEM, prompt, SCHEMA, load_api_key())
     verified = verify(answer, excerpts)
-    return format_triage(excerpts, verified, decide(result.level, verified, any(e.injection for e in excerpts)),
+    return format_triage(excerpts, verified, decide(analysis.risk.level, verified, any(e.injection for e in excerpts)),
                          tokens)
 
 
@@ -329,24 +348,8 @@ def _level(value: str) -> str:
     return {"low": "LOW", "guarded": "GUARDED", "high": "HIGH", "critical": "CRITICAL"}.get(value, value.upper())
 
 
-def _show_key(key: str) -> str:
-    # Keys hold hostnames and IP addresses; defang every dot so no terminal turns them into links.
-    return _printable(key.replace(".", "[.]"))
-
-
 def _plural(count: int, one: str, many: str) -> str:
     return f"{count} {one if count == 1 else many}"
-
-
-def _printable(text: str) -> str:
-    # Names and metadata are attacker-controlled; raw control characters could rewrite the terminal.
-    return "".join(ch if ch.isprintable() else "?" for ch in text)
-
-
-def _defang(text: str) -> str:
-    """Indicators in reports must not be clickable: hxxps://evil[.]example, 203[.]0[.]113[.]5."""
-    text = _URL_TEXT.sub(lambda m: f"hxxp{m.group(1)}://{m.group(2).replace('.', '[.]')}", text)
-    return _IPV4_TEXT.sub(lambda m: "[.]".join(m.groups()), text)
 
 
 def _short(path: Path) -> str:

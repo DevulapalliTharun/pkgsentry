@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pill %}
+{% block title %}Campaigns · PkgSentry{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Campaigns</h1>
+    <div class="sub">Packages that share infrastructure belonging to one attacker. Shared services such as github.com never link packages.</div>
+  </div>
+</div>
+
+{% for c in campaigns %}
+{% set g = c.graph %}
+<section class="card campaign" id="campaign-{{ c.number }}">
+  <div class="card-head">
+    <div class="row">{{ pill(c.level) }} <h2>Campaign {{ c.number }}</h2></div>
+    <span class="card-sub">{{ c.packages|length }} packages, {{ c.links|length }} shared indicator{{ '' if c.links|length == 1 else 's' }}</span>
+  </div>
+  <div class="card-body">
+    <svg class="graph" viewBox="0 0 {{ g.width }} {{ g.height }}" role="img" aria-label="Campaign {{ c.number }}: packages linked by shared indicators">
+      <text class="head" x="{{ g.key_x }}" y="13">SHARED INDICATOR</text>
+      <text class="head" x="{{ g.package_x }}" y="13">PACKAGE</text>
+      {% for d in g.edges %}<path class="edge" d="{{ d }}"/>{% endfor %}
+      {% for k in g.keys %}{% set label = k.label|show_key %}
+      <g class="gk"><title>{{ label }}</title>
+        <rect x="{{ g.key_x }}" y="{{ k.y - g.node_height / 2 }}" width="{{ g.key_width }}" height="{{ g.node_height }}" rx="7"/>
+        <text x="{{ g.key_x + 12 }}" y="{{ k.y }}">{{ label[:40] }}{{ '…' if label|length > 40 }}</text>
+      </g>
+      {% endfor %}
+      {% for p in g.packages %}
+      <a href="/package/{{ p.label|urlencode }}"><g class="gp {{ p.level }}"><title>{{ p.label }}</title>
+        <rect x="{{ g.package_x }}" y="{{ p.y - g.node_height / 2 }}" width="{{ g.package_width }}" height="{{ g.node_height }}" rx="7"/>
+        <text x="{{ g.package_x + 12 }}" y="{{ p.y }}">{{ p.label[:26] }}{{ '…' if p.label|length > 26 }}</text>
+      </g></a>
+      {% endfor %}
+    </svg>
+  </div>
+</section>
+{% else %}
+<section class="card"><div class="empty">No two saved packages share an attacker-specific indicator yet.</div></section>
+{% endfor %}
+{% endblock %}

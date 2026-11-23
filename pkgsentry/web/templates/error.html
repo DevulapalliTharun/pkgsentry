@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} · PkgSentry{% endblock %}
+{% block content %}
+<section class="card"><div class="empty"><h1>{{ status }}</h1><p>{{ detail }}</p><p><a href="/">Back to findings</a></p></div></section>
+{% endblock %}

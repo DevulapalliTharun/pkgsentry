@@ -4,10 +4,10 @@ import json
 import re
 from dataclasses import dataclass
 
+from pkgsentry.scoring import LEVELS
 from pkgsentry.triage.evidence import Excerpt
 from pkgsentry.triage.prompt import IOC_TYPES, VERDICTS
 
-LEVELS = ("low", "guarded", "high", "critical")
 MAX_ITEMS = 20
 MAX_TEXT = 400
 MAX_SUMMARY = 1000

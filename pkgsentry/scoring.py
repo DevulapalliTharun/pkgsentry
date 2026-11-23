@@ -10,6 +10,7 @@ from pkgsentry.analyzers.typosquat import NameCheck
 from pkgsentry.models import PackageInfo
 
 _LEVELS = ((20, "low"), (40, "guarded"), (70, "high"), (101, "critical"))
+LEVELS = tuple(label for _, label in _LEVELS)
 _CODE_RULES = {"secret + network", "endpoint + network", "decoded exec"}
 _OBFUSCATION_RULES = {
     "encoded code", "encoded exec", "encoded string", "string-built exec", "invisible unicode",

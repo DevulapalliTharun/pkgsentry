@@ -39,14 +39,18 @@ class Excerpt:
     def injection(self) -> bool:
         return any(_INJECTION.search(line) for line in self.code)
 
-    def render(self) -> str:
+    def header(self) -> str:
         end = self.start + len(self.code) - 1
-        header = (f"[{self.tag}] {visible(self.path)} lines {self.start}-{end} "
-                  f"(flagged line {', '.join(map(str, self.flagged))}: {', '.join(self.rules)})")
-        body = [f"{'>' if number in self.flagged else ' '}{number:>5} | {text}"
+        return (f"[{self.tag}] {visible(self.path)} lines {self.start}-{end} "
+                f"(flagged line {', '.join(map(str, self.flagged))}: {', '.join(self.rules)})")
+
+    def body(self) -> list[str]:
+        return [f"{'>' if number in self.flagged else ' '}{number:>5} | {text}"
                 + (f" ...[{cut} more characters]" if cut else "")
                 for number, (text, cut) in enumerate(zip(self.code, self.cut), self.start)]
-        return "\n".join([header, *body])
+
+    def render(self) -> str:
+        return "\n".join([self.header(), *self.body()])
 
 
 def build_evidence(root: Path, hooks: list[Hook], findings: list[Finding]) -> list[Excerpt]:

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pill, bar, icon %}
+{% block title %}Findings · PkgSentry{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Findings</h1>
+    <div class="sub">Packages ranked by review priority. A score is a triage priority, not a verdict.</div>
+  </div>
+</div>
+
+<div class="grid-kpi">
+  <div class="card kpi"><div class="icon blue">{{ icon('box') }}</div><div><div class="num">{{ view.packages }}</div><div class="label">Packages scanned</div></div></div>
+  <div class="card kpi"><div class="icon red">{{ icon('alert') }}</div><div><div class="num">{{ view.levels.critical + view.levels.high }}</div><div class="label">Critical or high risk</div></div></div>
+  <div class="card kpi"><div class="icon violet">{{ icon('share') }}</div><div><div class="num">{{ view.campaigns|length }}</div><div class="label">Campaigns, {{ view.linked_packages }} packages</div></div></div>
+  <div class="card kpi"><div class="icon orange">{{ icon('target') }}</div><div><div class="num">{{ view.indicators }}</div><div class="label">Linkable indicators</div></div></div>
+</div>
+
+<div class="grid-split">
+  <section class="card">
+    <div class="card-head"><h2>Risk by package</h2><span class="card-sub">highest level per package</span></div>
+    <div class="card-body donut-wrap">
+      <svg class="donut" viewBox="0 0 36 36" role="img" aria-label="Packages by risk level">
+        <circle class="track" cx="18" cy="18" r="15.9155"/>
+        {% for name, count, share, offset in view.donut if count %}
+        <circle class="ring {{ name }}" cx="18" cy="18" r="15.9155" stroke-dasharray="{{ share }} {{ 100 - share }}" stroke-dashoffset="{{ offset }}"/>
+        {% endfor %}
+        <text class="total" x="18" y="19.600">{{ view.packages }}</text>
+        <text class="cap" x="18" y="24">packages</text>
+      </svg>
+      <div class="legend">
+        {% for name, count, share, offset in view.donut %}
+        <a href="/?level={{ name }}"><span class="swatch {{ name }}"></span>{{ name|capitalize }}<span class="count">{{ count }}</span></a>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Campaigns</h2><a class="small" href="/campaigns">View graph</a></div>
+    <div class="card-body">
+      {% for c in view.campaigns[:3] %}
+      <div class="campaign">
+        <div class="row">{{ pill(c.level) }} <a href="/campaigns#campaign-{{ c.number }}"><strong>Campaign {{ c.number }}</strong></a> <span class="muted small">{{ c.packages|length }} packages share {{ c.links|length }} indicator{{ '' if c.links|length == 1 else 's' }}</span></div>
+        <div class="members">{% for name in c.packages[:6] %}<a class="chip" href="/package/{{ name|urlencode }}">{{ name }}</a>{% endfor %}{% if c.packages|length > 6 %}<span class="muted small">+{{ c.packages|length - 6 }} more</span>{% endif %}</div>
+      </div>
+      {% else %}
+      <div class="muted">No two saved packages share an attacker-specific indicator yet.</div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <div class="tabs">
+    <a class="{{ 'active' if not view.shown_level }}" href="/{{ '?q=' ~ (view.query|urlencode) if view.query }}">All <span class="n">{{ view.scans }}</span></a>
+    {% for name in ['critical', 'high', 'guarded', 'low'] %}
+    <a class="{{ 'active' if view.shown_level == name }}" href="/?level={{ name }}{{ '&q=' ~ (view.query|urlencode) if view.query }}">{{ name|capitalize }} <span class="n">{{ view.scan_levels[name] }}</span></a>
+    {% endfor %}
+  </div>
+  {% if view.rows %}
+  <table>
+    <thead><tr><th>Severity</th><th>Package</th><th>Score</th><th>Evidence</th><th>Campaign</th><th>Scanned</th></tr></thead>
+    <tbody>
+    {% for row in view.rows %}{% set s = row.scan %}
+      <tr>
+        <td>{{ pill(s.level) }}</td>
+        <td><a class="pkg" href="/package/{{ s.package|urlencode }}">{{ s.package }}</a><div class="pkg-sub">{{ s.version }} &middot; {{ s.kind }}</div></td>
+        <td><div class="score"><span class="v">{{ s.score|int }}</span>{{ bar(s.score, s.level) }}</div></td>
+        <td>{% for c in row.categories[:4] %}<span class="chip">{{ c }}</span>{% else %}<span class="muted small">none</span>{% endfor %}</td>
+        <td>{% if row.campaign %}<a class="chip accent" href="/campaigns#campaign-{{ row.campaign }}">Campaign {{ row.campaign }} &middot; {{ row.campaign_size }} packages</a>{% else %}<span class="muted small">none</span>{% endif %}</td>
+        <td class="muted small">{{ s.scanned_at[:10] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No scans match{{ ' "' ~ view.query ~ '"' if view.query }}.</div>
+  {% endif %}
+</section>
+{% endblock %}

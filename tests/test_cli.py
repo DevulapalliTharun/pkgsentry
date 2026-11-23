@@ -4,6 +4,7 @@ from pkgsentry import cli
 from pkgsentry.cli import _printable, format_code, format_fetch, format_scan, main
 from pkgsentry.analyzers.rules import Finding
 from pkgsentry.models import PackageInfo, ReleaseFile
+from pkgsentry.pipeline import Analysis
 from pkgsentry.scoring import RiskReport, RiskSignal
 from pkgsentry.fetch.extract import ExtractionReport
 from pkgsentry.models import ReleaseFile
@@ -53,11 +54,7 @@ def test_scan_command_runs_all_analyzers_without_network(tmp_path, monkeypatch, 
                        "ab" * 32, None)
     extraction = ExtractionReport(root=tmp_path, files=[], bytes_written=0)
     monkeypatch.setattr(cli, "_fetch", lambda args: (package, file, tmp_path / file.filename, extraction))
-    monkeypatch.setattr(cli, "find_hooks", lambda root, name, kind: [])
-    monkeypatch.setattr(cli, "check_name", lambda name: None)
-    monkeypatch.setattr(cli, "check_code", lambda root, kind, hooks: [])
-    monkeypatch.setattr(cli, "scan_obfuscation", lambda root, kind, hooks, findings: [])
-    monkeypatch.setattr(cli, "score_package", lambda package, names, hooks, findings: RiskReport(0, "low", ()))
+    monkeypatch.setattr(cli, "analyze", lambda root, pkg, kind: Analysis([], [], RiskReport(0, "low", ()), [], []))
     assert main(["scan", "demo"]) == 0
     assert "Risk score  0/100  LOW" in capsys.readouterr().out
 

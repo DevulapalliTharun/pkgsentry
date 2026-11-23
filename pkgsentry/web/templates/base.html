@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}PkgSentry{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{% from "_macros.html" import icon %}
+<aside class="nav">
+  <a class="brand" href="/">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3l11 4.500V15c0 7.400-4.800 12.600-11 14.500C9.800 27.600 5 22.400 5 15V7.500L16 3z" fill="#2e6bff"/><path d="M11 16l3.600 3.600 6.900-7.100" fill="none" stroke="#fff" stroke-width="2.600" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    PkgSentry
+  </a>
+  <div class="nav-label">Detect</div>
+  <a class="nav-item {% if page == 'overview' %}active{% endif %}" href="/">{{ icon('list') }} Findings</a>
+  <a class="nav-item {% if page == 'campaigns' %}active{% endif %}" href="/campaigns">{{ icon('share') }} Campaigns</a>
+  <div class="nav-label">Developers</div>
+  <a class="nav-item" href="/openapi.json">{{ icon('code') }} API schema</a>
+  <div class="nav-foot">Read-only view of the scan history.<br>Nothing is installed or run.</div>
+</aside>
+<div class="main">
+  <header class="topbar">
+    <form class="search" action="/" method="get" role="search">
+      {{ icon('search') }}
+      <input type="search" name="q" maxlength="64" placeholder="Search packages" value="{{ view.query if view is defined else '' }}" aria-label="Search packages">
+    </form>
+    <div class="topbar-note"><span class="live"></span> Static analysis only</div>
+  </header>
+  <main class="content">
+{% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

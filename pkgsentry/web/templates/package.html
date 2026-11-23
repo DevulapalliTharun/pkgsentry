@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pill, bar, ring %}
+{% block title %}{{ name }} · PkgSentry{% endblock %}
+
+{% macro scan_body(s) %}
+  <h3>Why this score</h3>
+  {% for sig in s.signals %}
+  <div class="signal">
+    <div><span class="chip">{{ sig.category }}</span></div>
+    <div>{{ sig.detail|defang }}{% if sig.path %}<div class="where">{{ sig.path }}{% if sig.line %}:{{ sig.line|int }}{% endif %}</div>{% endif %}</div>
+    <div class="pts">+{{ sig.points|int }}</div>
+  </div>
+  {% else %}
+  <div class="muted small">No risk signals were saved with this scan.</div>
+  {% endfor %}
+  {% if s.signals %}<div class="card-sub">Only the strongest signal of each kind counts, and the total is capped at 100.</div>{% endif %}
+
+  {% if s.excerpts %}
+  <h3 class="gap">Code evidence</h3>
+  <div class="card-sub">The flagged lines, as untrusted text. Web addresses are defused and invisible characters are written out.</div>
+  {% for e in s.excerpts %}
+  <div class="excerpt">
+    <div class="excerpt-title">{{ e.header|defang }}</div>
+    <div class="code">{% for line in e.body %}<span class="ln{{ ' hit' if line.startswith('>') }}">{{ line|defang }}</span>{% endfor %}</div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if s.indicators %}
+  <h3 class="gap">Indicators</h3>
+  <table>
+    <thead><tr><th>Address</th><th>Links packages by</th><th>Found in</th></tr></thead>
+    <tbody>
+    {% for i in s.indicators %}
+      <tr>
+        <td class="mono">{{ i.value|defang }}{% if i.hidden %} <span class="chip">base64</span>{% endif %}</td>
+        <td>{% if i.key %}<span class="chip accent mono">{{ i.key|show_key }}</span>{% else %}<span class="muted small">shared service, never links</span>{% endif %}</td>
+        <td class="muted small mono">{{ i.path }}:{{ i.line|int }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="crumbs"><a href="/">Findings</a> / {{ name }}</div>
+<div class="page-head">
+  {{ ring(scans[0].score, scans[0].level) }}
+  <div>
+    <h1>{{ name }}</h1>
+    <div class="sub">{{ scans|length }} saved scan{{ '' if scans|length == 1 else 's' }}</div>
+  </div>
+  {{ pill(level) }}
+  {% if campaign %}<a class="chip accent" href="/campaigns#campaign-{{ campaign }}">Campaign {{ campaign }}</a>{% endif %}
+</div>
+
+<div class="grid-2">
+  <div class="stack">
+    {% for s in scans %}
+    {% if loop.first %}
+    <section class="card">
+      <div class="card-head">
+        <div><h2>{{ s.version }} &middot; {{ s.kind }}</h2><div class="card-sub">Scanned {{ s.scanned_at[:16]|replace('T', ' ') }} UTC</div></div>
+        <div class="score"><span class="v">{{ s.score|int }}</span>{{ bar(s.score, s.level) }}</div>
+      </div>
+      <div class="card-body">{{ scan_body(s) }}</div>
+    </section>
+    {% else %}
+    <details class="card older">
+      <summary>{{ pill(s.level) }} &nbsp;{{ s.version }} &middot; {{ s.kind }} <span class="muted small">&nbsp;score {{ s.score|int }}, scanned {{ s.scanned_at[:10] }}</span></summary>
+      <div class="card-body">{{ scan_body(s) }}</div>
+    </details>
+    {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><h2>Details</h2></div>
+      <div class="card-body">
+        <dl class="facts">
+          <dt>Version</dt><dd>{{ scans[0].version }}</dd>
+          <dt>File</dt><dd>{{ scans[0].kind }}</dd>
+          <dt>SHA-256</dt><dd class="mono">{{ scans[0].sha256 or 'not saved' }}</dd>
+          <dt>Scanned</dt><dd>{{ scans[0].scanned_at[:16]|replace('T', ' ') }} UTC</dd>
+        </dl>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Related packages</h2></div>
+      <div class="card-body related">
+        {% for other, other_level, keys in related %}
+        <div>
+          <div class="row">{{ pill(other_level) }} <a class="pkg" href="/package/{{ other|urlencode }}">{{ other }}</a></div>
+          <div class="members">{% for key in keys %}<span class="chip accent mono">{{ key|show_key }}</span>{% endfor %}</div>
+        </div>
+        {% else %}
+        <div class="muted small">No saved package shares an attacker-specific indicator with this one.</div>
+        {% endfor %}
+      </div>
+    </section>
+    <div class="note">Everything on this page was written by the package author. It is shown as text and never run.</div>
+  </div>
+</div>
+{% endblock %}
